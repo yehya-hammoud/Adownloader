@@ -1,53 +1,75 @@
 package com.adownloader;
 
-import android.content.ContentValues;
-import android.content.ContentResolver;
-import android.net.Uri;
+import android.Manifest;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
-import android.os.Environment;
-import android.provider.MediaStore;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.ResultReceiver;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.view.View;
-import android.widget.LinearLayout;
+import android.util.Log;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
-
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-
-
-import okhttp3.Call;
-import okhttp3.Callback;
-import okhttp3.OkHttpClient;
-import okhttp3.Request;
-import okhttp3.Response;
-import okio.BufferedSink;
-import okio.BufferedSource;
-import okio.Okio;
+import androidx.core.content.ContextCompat;
 
 public class MainActivity extends AppCompatActivity {
 
     private EditText urlInput;
+    private LinearLayout optionsLayout;
+    private EditText threadInput;
     private Button goButton;
+
+    private LinearLayout infoLayout;
+    private TextView nameText;
+    private TextView sizeText;
+
     private ProgressBar progressBar;
     private TextView statusText;
+
     private Button pauseButton;
     private Button cancelButton;
-    
-    private Call activeCall;
+
+    private String url = "";
+    private int threads = 1;
+    private long totalFileBytes = 0;   
+    private String fileName = "";
 
     private boolean isSizeKnown = false;
     private boolean isPaused = false;
-    private String lastProgressText = "";
-    private File tempFile;
 
-    private final OkHttpClient client = new OkHttpClient();
+    private int currentProgress = 0;
+
+    public static final int STATUS_FILE_INFO = 100;
+    public static final int STATUS_PROGRESS  = 101;
+    public static final int STATUS_PAUSED    = 102;
+    public static final int STATUS_RESUME    = 103;
+    public static final int STATUS_CANCEL    = 104;
+    public static final int STATUS_FINISHED  = 105;
+    public static final int STATUS_ERROR     = 106;
+
+
+    private ResultReceiver resultReceiver;
+
+    private final ActivityResultLauncher<String> requestPermissionLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestPermission(), isGranted -> {
+                if (isGranted) {
+                    Toast.makeText(this, "Notification permission granted", Toast.LENGTH_SHORT).show();
+                } else {
+                    Toast.makeText(this, "Notifications disabled. Download will run silently in background.", Toast.LENGTH_LONG).show();
+                }
+            });
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -55,274 +77,204 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
 
         urlInput = findViewById(R.id.urlInput);
+        optionsLayout = findViewById(R.id.optionsLayout);
+        infoLayout = findViewById(R.id.infoLayout);
+        threadInput = findViewById(R.id.threadInput); 
         goButton = findViewById(R.id.goButton);
         progressBar = findViewById(R.id.progressBar);
         statusText = findViewById(R.id.statusText);
+        nameText = findViewById(R.id.nameText);
+        sizeText = findViewById(R.id.sizeText);
         pauseButton = findViewById(R.id.pauseButton);
         cancelButton = findViewById(R.id.cancelButton);
 
-
-        cancelButton.setOnClickListener(v -> {
-            if(isPaused){                    
-                if (tempFile != null && tempFile.exists()){
-                        tempFile.delete();
-                    }}
-            else{                
-                if (activeCall != null && !activeCall.isCanceled()) {
-                    activeCall.cancel(); 
-                    if (tempFile != null && tempFile.exists()){
-                        tempFile.delete();
-                    }
-                }}
-                isPaused = false;
-                progressBar.setVisibility(View.GONE);
-                statusText.setVisibility(View.GONE);
-                pauseButton.setVisibility(View.GONE);
-                cancelButton.setVisibility(View.GONE);
-            }
-        );
-
-
-        pauseButton.setOnClickListener(v -> {
-
-            LinearLayout.LayoutParams barParams = (LinearLayout.LayoutParams) progressBar.getLayoutParams();
-            LinearLayout.LayoutParams textParams = (LinearLayout.LayoutParams) statusText.getLayoutParams();
-
-            if (!isPaused) {
-                isPaused = true;
-                if (activeCall != null && !activeCall.isCanceled()) {
-                    // Pausing is just canceling without deleting the temp file 
-                    activeCall.cancel(); 
-                }
-                if (!isSizeKnown){
-                    progressBar.setIndeterminate(false);
-                    progressBar.setProgress(0);
-                }
-                barParams.weight = 1.5f;
-                textParams.weight = 1.5f;
-                
-                pauseButton.setText("Resume");
-                statusText.setText("Paused " + lastProgressText );
-            } else {
-                String downloadUrl = urlInput.getText().toString().trim();
-                startDownload(downloadUrl);
-                statusText.setText("Resuming");
-                barParams.weight = 2.0f;
-                textParams.weight = 1.0f;
-            }
-            progressBar.setLayoutParams(barParams);
-            statusText.setLayoutParams(textParams);
-        });
-
-        goButton.setOnClickListener(new View.OnClickListener() {
+        setupResultReceiver();
+        checkNotificationPermission();
+        setupInputWatchers();
+        setupClickListeners();
+    }
+    
+    private void setupResultReceiver(){
+            resultReceiver = new ResultReceiver(new Handler(Looper.getMainLooper())) {
             @Override
-            public void onClick(View v) {
-                String downloadUrl = urlInput.getText().toString().trim();
+            protected void onReceiveResult(int resultCode, Bundle resultData) {
+                super.onReceiveResult(resultCode, resultData);
+                if (resultData == null) return;
 
-                if (downloadUrl.isEmpty()) {
-                    urlInput.setError("Please enter a link!");
+                switch (resultCode) {
+                    case STATUS_FILE_INFO:
+                        Log.d("Adownloader_UI","got info");
+                        fileName = resultData.getString("file_name", "File");
+                        totalFileBytes = resultData.getLong("file_size", 0);
+                        int threadCount =  resultData.getInt("thread_count", 0);
+                        
+                        nameText.setText(fileName +" "+ threadCount + " ");
+                        isSizeKnown = (totalFileBytes > 0);
+
+                        if (isSizeKnown) {
+                            long sizeInMb = totalFileBytes / (1024 * 1024);
+                            sizeText.setText(sizeInMb + " MB");
+                            progressBar.setIndeterminate(false);
+                        } else {
+                            sizeText.setText("Unknown size");
+                            progressBar.setIndeterminate(true);
+                        }
+                        progressBar.setVisibility(View.VISIBLE);
+                        statusText.setVisibility(View.VISIBLE);
+                        pauseButton.setVisibility(View.VISIBLE);
+                        cancelButton.setVisibility(View.VISIBLE);
+                        infoLayout.setVisibility(View.VISIBLE);
+                        break;
+
+                    case STATUS_PROGRESS:
+                        Log.d("Adownloader_UI","progressed");
+                        currentProgress = resultData.getInt("progress");
+                        long downloadedBytes = resultData.getLong("bytes_downloaded");
+                        long downloadedMb = downloadedBytes / (1024 * 1024);
+
+                        if (isSizeKnown) {
+                            progressBar.setProgress(currentProgress);
+                            long totalMb = totalFileBytes / (1024 * 1024);
+                            Log.d("Adownloader_UI", "Progress: " + currentProgress );
+                            statusText.setText(currentProgress + "% • " + downloadedMb + " / " + totalMb + " MB");
+                        } else {
+                            statusText.setText("Downloaded " + downloadedMb + " MB");
+                        }
+                        break;
+
+                    case STATUS_PAUSED:
+                        Log.d("Adownloader_UI","paused");
+                        isPaused = true;
+                        pauseButton.setText("Resume");
+                        statusText.setText("Paused (" + currentProgress + "%)");
+                        break;
+
+                    case STATUS_CANCEL:
+                        Log.d("Adownloader_UI","canceled");
+                        Toast.makeText(MainActivity.this, "Download Complete!", Toast.LENGTH_LONG).show();
+                        resetUiState();
+                        break;
+                    case STATUS_FINISHED:
+                        Toast.makeText(MainActivity.this, "Download Complete!", Toast.LENGTH_LONG).show();
+                        resetUiState();
+                        break;
+
+                    case STATUS_ERROR:
+                        Log.d("Adownloader_UI","error");
+                        String errorMsg = resultData.getString("error", "Unknown error");
+                        Toast.makeText(MainActivity.this, "Error: " + errorMsg, Toast.LENGTH_LONG).show();
+                        resetUiState();
+                        break;
+                }
+            }
+        };
+    }
+
+    private void checkNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) 
+                    != PackageManager.PERMISSION_GRANTED) {
+                
+                requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS);
+            }
+        }
+    }
+
+    private void setupInputWatchers() {
+        urlInput.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
+
+            @Override
+            public void afterTextChanged(Editable s) {
+                String input = s.toString().trim();
+                if (android.util.Patterns.WEB_URL.matcher(input).matches()) {
+                    urlInput.setError(null); 
+                    url = input;
+                    optionsLayout.setVisibility(View.VISIBLE);
+                } else if (!input.isEmpty()) {
+                    urlInput.setError("Please enter a valid URL");
+                    optionsLayout.setVisibility(View.GONE);
                 } else {
-                    Toast.makeText(MainActivity.this, "Starting download...", Toast.LENGTH_SHORT).show();
-                    startDownload(downloadUrl);
-                    progressBar.setVisibility(View.VISIBLE);
-                    statusText.setVisibility(View.VISIBLE);
-                    progressBar.setProgress(0);
-                    statusText.setText("Starting");
+                    optionsLayout.setVisibility(View.GONE);
                 }
             }
         });
-    }
 
-    private void startDownload(String url) {
-        isPaused = false;
-        pauseButton.setText("Pause");
-        pauseButton.setVisibility(View.VISIBLE);
-        cancelButton.setVisibility(View.VISIBLE);
-
-        String fileName = url.substring(url.lastIndexOf('/') + 1);
-        if (fileName.isEmpty() || !fileName.contains(".")) {
-            fileName = "downloaded_file_" + System.currentTimeMillis();
-        }
-
-        final String finalFileName = fileName;
-        tempFile = new File(getFilesDir(), "temp_" + finalFileName + ".tmp");
-
-        long existingBytes = tempFile.exists() ? tempFile.length() : 0;
-
-        Request headRequest = new Request.Builder()
-                .url(url)
-                .head()
-                .build();
-
-        activeCall = client.newCall(headRequest);
-        activeCall.enqueue(new Callback() { 
-            @Override
-            public void onFailure(Call call, IOException e) {
-                if (!isPaused) {
-                    showToast("Failed to connect to server");
-                    runOnUiThread(() -> {
-                        progressBar.setVisibility(View.GONE);
-                        statusText.setVisibility(View.GONE);
-                        pauseButton.setVisibility(View.GONE);
-                        cancelButton.setVisibility(View.GONE);
-                    });
-                }
-            }
+        threadInput.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
 
             @Override
-            public void onResponse(Call call, Response response) throws IOException {
-                if (!response.isSuccessful()) {
-                    showToast("Server returned error: " + response.code());
-                    response.close(); 
-                    return;
-                }
-
-                String acceptRanges = response.header("Accept-Ranges"); 
-                // Can choose which byte the download starts from so can resume from pause or network fail
-                boolean supportsRanges = "bytes".equalsIgnoreCase(acceptRanges);
-
-                String contentLengthHeader = response.header("Content-Length");
-                long totalFileSize = 0;
-
-                if (contentLengthHeader != null) {
+            public void afterTextChanged(Editable s) {
+                String input = s.toString().trim();
+                if (!input.isEmpty()) {
                     try {
-                        totalFileSize = Long.parseLong(contentLengthHeader);
+                        int num = Integer.parseInt(input);
+                        threads = Math.max(num, 1);
+                        threadInput.setError(null);
                     } catch (NumberFormatException e) {
-                        totalFileSize = 0; 
+                        threadInput.setError("Enter a valid number");
                     }
+                } else {
+                    threads = 1;
                 }
-                isSizeKnown = (totalFileSize>0);
-                
-                response.close();
-
-                downloadFileStream(url, tempFile, finalFileName, totalFileSize, existingBytes, supportsRanges);
             }
         });
     }
 
-
-    private void downloadFileStream(String url, File tempFile, String fileName, 
-        long totalFileSize, long existingBytes, boolean supportsRanges) {
-
-        Request.Builder requestBuilder = new Request.Builder().url(url);
-
-        boolean isResuming = supportsRanges && existingBytes > 0;
-        if (isResuming) {
-            requestBuilder.addHeader("Range", "bytes=" + existingBytes + "-");
-        }
-
-        activeCall = client.newCall(requestBuilder.build());
-        activeCall.enqueue(new Callback() {
-        @Override
-        public void onFailure(Call call, IOException e) {
-            if (!isPaused) {
-                showToast("Download failed or interrupted");
-            }
-        }
-
-        @Override
-        public void onResponse(Call call, Response response) throws IOException {
-            int statusCode = response.code();
-
-            if (statusCode != 200 && statusCode != 206) {
-                showToast("Download server error HTTP " + statusCode);
-                runOnUiThread(() -> {
-                    progressBar.setVisibility(View.GONE);
-                    statusText.setVisibility(View.GONE);
-                    pauseButton.setVisibility(View.GONE);
-                    cancelButton.setVisibility(View.GONE);
-                });
+    private void setupClickListeners() {
+        goButton.setOnClickListener(v -> {
+            if (url.isEmpty()) {
+                Toast.makeText(this, "Please enter a valid URL", Toast.LENGTH_SHORT).show();
                 return;
             }
 
-            try (BufferedSource source = response.body().source();
-                BufferedSink sink = Okio.buffer(isResuming ? Okio.appendingSink(tempFile) : Okio.sink(tempFile))) {
+            Intent intent = new Intent(this, DataSyncService.class);
+            intent.putExtra("DOWNLOAD_URL", url);
+            intent.putExtra("NUM_CHUNKS", threads); 
+            intent.putExtra(DataSyncService.EXTRA_RECEIVER, resultReceiver);
+            Log.d("Adownloader_UI", "Sending Intent with Receiver: " + (resultReceiver != null));
+            ContextCompat.startForegroundService(this, intent);
 
-                long totalBytesRead = isResuming ? existingBytes : 0;                
-                long readBytes;
-                
-                okio.Buffer buffer = sink.buffer();
-                long segmentSize = 8192;
+            urlInput.setText("");
+            optionsLayout.setVisibility(View.GONE);
+            goButton.setEnabled(false);
+            pauseButton.setText("Pause");
+            isPaused = false;
+        });
 
-                while ((readBytes = source.read(buffer, segmentSize)) != -1) {
-                    totalBytesRead += readBytes;
-                    sink.emitCompleteSegments();
-
-                    double downloadedMB = totalBytesRead / (1024.0 * 1024.0);
-                    final String progressText;
-
-                    if (totalFileSize > 0) {
-                        double totalMB = totalFileSize / (1024.0 * 1024.0);
-                        progressText = String.format(java.util.Locale.US, "%.1f MB/%.1f MB", downloadedMB, totalMB);
-                    } else {
-                        progressText = String.format(java.util.Locale.US, "%.1f MB/??", downloadedMB);
-                    }
-
-                    if (!progressText.equals(lastProgressText)) {
-                        lastProgressText = progressText;
-                        final String textToDisplay = progressText;
-                        final long totalBytes = totalBytesRead;
-                        runOnUiThread(() -> {
-                            if (totalFileSize > 0) {
-                                int progress = (int) ((totalBytes * 100) / totalFileSize);
-                                progressBar.setIndeterminate(false);
-                                progressBar.setProgress(progress);
-                            } else {
-                                progressBar.setIndeterminate(true);
-                            }
-                            statusText.setText(textToDisplay);
-                        });
-                    }
-                }
-
-                sink.flush();
-
-                publishToPublicDownloads(tempFile, fileName);
-
-                runOnUiThread(() -> {
-                    progressBar.setVisibility(View.GONE);
-                    statusText.setVisibility(View.GONE);
-                    pauseButton.setVisibility(View.GONE);
-                    cancelButton.setVisibility(View.GONE);
-                    Toast.makeText(MainActivity.this, "Download finished successfully!", Toast.LENGTH_SHORT).show();
-                });
-
-            } catch (IOException e) {
-                if (!isPaused) {
-                    showToast("Stream interrupted!");
-                }
+        pauseButton.setOnClickListener(v -> {
+            Intent prIntent = new Intent(this, DataSyncService.class);
+            if (!isPaused) {
+                isPaused = true;
+                prIntent.setAction(DataSyncService.ACTION_PAUSE);
+            } else {
+                isPaused = false;
+                prIntent.setAction(DataSyncService.ACTION_RESUME);
+                statusText.setText("Resuming...");
+                pauseButton.setText("Pause");
             }
-        }
-    });
-}
+            ContextCompat.startForegroundService(this, prIntent);
+        });
 
-
-    private void showToast(String message) {
-        runOnUiThread(() -> Toast.makeText(MainActivity.this, message, Toast.LENGTH_SHORT).show());
+        cancelButton.setOnClickListener(v -> {
+            Intent cancelIntent = new Intent(this, DataSyncService.class);
+            cancelIntent.setAction(DataSyncService.ACTION_CANCEL);
+            startService(cancelIntent);
+            resetUiState();
+        });
     }
 
-
-    private void publishToPublicDownloads(File tempFile, String fileName) throws IOException {
-        ContentValues values = new ContentValues();
-        values.put(MediaStore.MediaColumns.DISPLAY_NAME, fileName);
-        values.put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream");
-        values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
-
-        ContentResolver resolver = getContentResolver();
-        Uri uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
-
-        if (uri != null) {
-            try (InputStream inputStream = new FileInputStream(tempFile);
-                OutputStream outputStream = resolver.openOutputStream(uri)) {
-        
-                byte[] buffer = new byte[8192];
-                int length;
-                while ((length = inputStream.read(buffer)) > 0) {
-                    outputStream.write(buffer, 0, length);
-                }
-            }
-            
-            tempFile.delete();
-        }
+    private void resetUiState() {
+        infoLayout.setVisibility(View.GONE);
+        optionsLayout.setVisibility(View.GONE);
+        progressBar.setVisibility(View.GONE);
+        statusText.setVisibility(View.GONE);
+        pauseButton.setVisibility(View.GONE);
+        cancelButton.setVisibility(View.GONE);
+        goButton.setEnabled(true);
+        isPaused = false;
+        currentProgress = 0;
     }
 }

@@ -13,18 +13,28 @@
         android:textSize="24sp"
         android:layout_marginBottom="16dp" />
 
-    <LinearLayout
+    <EditText
+        android:id="@+id/urlInput"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal">
+        android:hint="Paste link here"
+        android:inputType="textUri" />
+
+    <LinearLayout
+        android:id="@+id/optionsLayout"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:visibility="gone">
 
         <EditText
-            android:id="@+id/urlInput"
+            android:id="@+id/threadInput"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:hint="Paste link here"
-            android:inputType="textUri" />
+            android:hint="Thread Count"
+            android:inputType="number"
+            android:maxLength="1"  />
 
         <Button
             android:id="@+id/goButton"
@@ -32,6 +42,26 @@
             android:layout_height="wrap_content"
             android:layout_marginStart="8dp"
             android:text="Go" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/infoLayout"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+    <TextView
+        android:id="@+id/nameText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="UnKnown"/>
+
+    <TextView
+        android:id="@+id/sizeText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="UnKnown" />
     </LinearLayout>
 
     <LinearLayout
