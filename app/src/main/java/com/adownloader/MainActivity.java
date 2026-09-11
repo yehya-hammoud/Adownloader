@@ -8,9 +8,14 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ResultReceiver;
+import android.os.SystemClock;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.View;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import android.webkit.DownloadListener;
 import android.util.Log;
 import android.widget.Button;
 import android.widget.EditText;
@@ -25,6 +30,10 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
 public class MainActivity extends AppCompatActivity {
+
+    private WebView webView;
+
+    private LinearLayout mainLayout;
 
     private EditText urlInput;
     private LinearLayout optionsLayout;
@@ -59,6 +68,9 @@ public class MainActivity extends AppCompatActivity {
     public static final int STATUS_FINISHED  = 105;
     public static final int STATUS_ERROR     = 106;
 
+    private long lastCheckedTime = System.nanoTime();
+    private long lastCheckedBytes = 0;
+
 
     private ResultReceiver resultReceiver;
 
@@ -76,6 +88,8 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        mainLayout = findViewById(R.id.mainLayout);
+        webView = findViewById(R.id.webView);
         urlInput = findViewById(R.id.urlInput);
         optionsLayout = findViewById(R.id.optionsLayout);
         infoLayout = findViewById(R.id.infoLayout);
@@ -92,8 +106,65 @@ public class MainActivity extends AppCompatActivity {
         checkNotificationPermission();
         setupInputWatchers();
         setupClickListeners();
+        setupWebView();
     }
-    
+
+    @Override
+    public void onBackPressed() {
+        if (webView != null && webView.canGoBack()) {
+            webView.goBack();
+        } else {
+            webView.setVisibility(View.GONE);
+            mainLayout.setVisibility(View.VISIBLE);
+        }            
+    }
+    private void setupWebView(){
+        WebSettings webSettings = webView.getSettings();
+        webSettings.setJavaScriptEnabled(true);
+        webView.setWebViewClient(new WebViewClient());
+        webView.setDownloadListener(new DownloadListener() {
+            @Override
+            public void onDownloadStart(String url, String userAgent, String contentDisposition, String mimeType, long contentLength) {
+
+                String pageUrl = webView.getUrl();
+
+                android.webkit.CookieManager cookieManager = android.webkit.CookieManager.getInstance();
+                cookieManager.flush();
+
+                String pageCookies = cookieManager.getCookie(pageUrl);
+
+                if (pageCookies == null) {
+                    pageCookies = cookieManager.getCookie(url);
+                }
+
+                String rawFileName = android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType);
+                String fileName;
+                try {
+                    String safeName = rawFileName.replaceAll("%2B", "%2b"); 
+                    fileName = java.net.URLDecoder.decode(safeName, "UTF-8");
+                } catch (Exception e) {
+                    fileName = rawFileName; 
+                }
+
+                Intent intent = new Intent(MainActivity.this, DataSyncService.class);
+                intent.putExtra("DOWNLOAD_URL", url);
+                intent.putExtra("PAGE_URL", pageUrl);          
+                intent.putExtra("FILE_NAME", fileName);
+                intent.putExtra("NUM_CHUNKS", threads);
+                intent.putExtra("USER_AGENT", userAgent); 
+                intent.putExtra("COOKIE", pageCookies);          
+                intent.putExtra(DataSyncService.EXTRA_RECEIVER, resultReceiver);
+
+                Log.d("Adownloader_UI", "Page URL: " + pageUrl);
+                Log.d("Adownloader_UI", "Main UI cookies: " + pageCookies);
+                Log.d("Adownloader_UI", "Catching download: " + fileName + " - " + contentLength);
+
+                ContextCompat.startForegroundService(MainActivity.this, intent);
+            }
+        });
+
+    }
+
     private void setupResultReceiver(){
             resultReceiver = new ResultReceiver(new Handler(Looper.getMainLooper())) {
             @Override
@@ -119,6 +190,9 @@ public class MainActivity extends AppCompatActivity {
                             sizeText.setText("Unknown size");
                             progressBar.setIndeterminate(true);
                         }
+                        webView.setVisibility(View.GONE);
+                        optionsLayout.setVisibility(View.GONE);
+                        mainLayout.setVisibility(View.VISIBLE);
                         progressBar.setVisibility(View.VISIBLE);
                         statusText.setVisibility(View.VISIBLE);
                         pauseButton.setVisibility(View.VISIBLE);
@@ -127,18 +201,19 @@ public class MainActivity extends AppCompatActivity {
                         break;
 
                     case STATUS_PROGRESS:
-                        Log.d("Adownloader_UI","progressed");
                         currentProgress = resultData.getInt("progress");
                         long downloadedBytes = resultData.getLong("bytes_downloaded");
-                        long downloadedMb = downloadedBytes / (1024 * 1024);
+                        String speedAndETA = resultData.getString("speedAndETA");
+                        double downloadedMb = downloadedBytes / (1024.0 * 1024.0);
 
                         if (isSizeKnown) {
                             progressBar.setProgress(currentProgress);
-                            long totalMb = totalFileBytes / (1024 * 1024);
+                            double totalMb = totalFileBytes / (1024.0 * 1024.0);
                             Log.d("Adownloader_UI", "Progress: " + currentProgress );
-                            statusText.setText(currentProgress + "% • " + downloadedMb + " / " + totalMb + " MB");
+                            String formattedSize = String.format(java.util.Locale.US, "%.2f / %.2f MB", downloadedMb, totalMb);
+                            statusText.setText(String.format(java.util.Locale.US, "%d%%  %s  %s", currentProgress, formattedSize, speedAndETA));
                         } else {
-                            statusText.setText("Downloaded " + downloadedMb + " MB");
+                            statusText.setText(String.format(java.util.Locale.US, "Downloaded %.2f MB  %s", downloadedMb, speedAndETA));
                         }
                         break;
 
@@ -229,19 +304,12 @@ public class MainActivity extends AppCompatActivity {
                 Toast.makeText(this, "Please enter a valid URL", Toast.LENGTH_SHORT).show();
                 return;
             }
-
-            Intent intent = new Intent(this, DataSyncService.class);
-            intent.putExtra("DOWNLOAD_URL", url);
-            intent.putExtra("NUM_CHUNKS", threads); 
-            intent.putExtra(DataSyncService.EXTRA_RECEIVER, resultReceiver);
-            Log.d("Adownloader_UI", "Sending Intent with Receiver: " + (resultReceiver != null));
-            ContextCompat.startForegroundService(this, intent);
-
-            urlInput.setText("");
-            optionsLayout.setVisibility(View.GONE);
-            goButton.setEnabled(false);
-            pauseButton.setText("Pause");
-            isPaused = false;
+            if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                    url = "https://" + url;
+            }
+            webView.setVisibility(View.VISIBLE);
+            mainLayout.setVisibility(View.GONE);
+            webView.loadUrl(url);
         });
 
         pauseButton.setOnClickListener(v -> {

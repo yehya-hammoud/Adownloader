@@ -19,27 +19,34 @@ public class ChunkDownloader implements Runnable {
         void onComplete(int chunkIndex);
     }
 
+    
     private final int chunkIndex;
     private final String url;
     private final File partFile;
     private final long startByte;
     private final long endByte;
     private final OkHttpClient client;
+    private final String cookie;
+    private final String userAgent;
     private final ChunkProgressListener listener;
+
     
     private Call activeCall;
     private volatile boolean isStopped = false;
 
     public ChunkDownloader(int chunkIndex, String url, File partFile, 
                             long startByte, long endByte, 
-                            OkHttpClient client, ChunkProgressListener listener) {
+                            OkHttpClient client,String cookie , String userAgent, ChunkProgressListener listener ) {
         this.chunkIndex = chunkIndex;
         this.url = url;
         this.partFile = partFile;
         this.startByte = startByte;
         this.endByte = endByte;
         this.client = client;
+        this.cookie = cookie;
+        this.userAgent = userAgent;
         this.listener = listener;
+
     }
 
     public File getFile() {
@@ -71,15 +78,23 @@ public class ChunkDownloader implements Runnable {
             return;
         }
 
-        Request request = new Request.Builder()
+        Request.Builder requestBuilder = new Request.Builder()
                 .url(url)
-                .addHeader("Range", "bytes=" + currentStartByte + "-" + endByte)
-                .build();
+                .addHeader("Range", "bytes=" + currentStartByte + "-" + endByte);
+
+        if (cookie != null && !cookie.isEmpty()) {
+            requestBuilder.addHeader("Cookie", cookie);
+        }
+        if (userAgent != null && !userAgent.isEmpty()) {
+            requestBuilder.addHeader("User-Agent", userAgent);
+        }
+
+        Request request = requestBuilder.build();
 
         activeCall = client.newCall(request);
 
         try (Response response = activeCall.execute()) {
-            if (!response.isSuccessful() && response.code() != 206) {
+            if (!response.isSuccessful() || (existingBytes > 0 && response.code() != 206)) {
                 if (listener != null) {
                     listener.onError(chunkIndex, new IOException("HTTP Error " + response.code()));
                 }

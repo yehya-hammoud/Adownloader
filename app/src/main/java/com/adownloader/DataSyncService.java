@@ -25,7 +25,6 @@ import android.util.Log;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
-import androidx.core.app.ServiceCompat;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -74,29 +73,40 @@ public class DataSyncService extends Service {
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private ExecutorService executorService;
-    private final OkHttpClient client = new OkHttpClient();
+    private final OkHttpClient client = new OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .writeTimeout(15, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build();
     
-    private final AtomicInteger completedChunksCount = new AtomicInteger(0);
-    private final AtomicLong totalBytesDownloaded = new AtomicLong(0);
     private final List<ChunkDownloader> activeChunkDownloaders = new CopyOnWriteArrayList<>();
     private final List<File> partFiles = new CopyOnWriteArrayList<>();
-    private final ConcurrentHashMap<Integer, Long> chunkProgressMap = new java.util.concurrent.ConcurrentHashMap<>();
-    private final AtomicInteger completedChunks = new java.util.concurrent.atomic.AtomicInteger(0);
-    private int totalChunksCount = 0;
+    private final ConcurrentHashMap<Integer, Long> chunkProgressMap = new ConcurrentHashMap<>();
+    private final AtomicInteger completedChunks = new AtomicInteger(0);
 
     private long lastNotificationUpdateTime = 0;
     
     private Call activeCall;
-    private File tempFile;
     private volatile boolean isPaused = false;
-    private volatile boolean isRunning = false;
-    private String savedUrl = "";
-    private int savedRequestedChunks = 4;
-    private String savedFileName = "";
+    private String url = "";
+    private int requestedChunks = 4;
+    private String cookie;
+    private String userAgent;
+    private String fileName = "";
+    private long totalFileSize = 0 ;
     private int currentProgress = 0;
+    private long lastDownloadedBytes = 0;
     private long startTimeMs = 0L;
 
-    private static final long MAX_RUNTIME_MS = TimeUnit.HOURS.toMillis(5) + TimeUnit.MINUTES.toMillis(55);
+    private String speedAndETA = "0KB/s --:--";
+    private List<Long> last5Speeds = new CopyOnWriteArrayList<>();
+    
+    private long prevdownloadedBytes = 0;
+    private long lastUpdateTimeMillis = 0;
+
+    private static final long MAX_RUNTIME_MS = TimeUnit.MINUTES.toMillis(2);
     private final Runnable shutdownRunnable = new Runnable() {
         @Override
         public void run() {
@@ -122,57 +132,58 @@ public class DataSyncService extends Service {
             
             if (ACTION_PAUSE.equals(action)) {
                 pauseDownload();
-                updateNotification(savedFileName + ". Paused", currentProgress, true, false);
+                updateNotification(fileName + " (Paused)", currentProgress, "" , true, false);
             } else if (ACTION_RESUME.equals(action)) {
                 resumeDownload();
             } else if (ACTION_CANCEL.equals(action)) {
                 cancelDownload(); 
             } else if (intent.hasExtra("DOWNLOAD_URL")) {
-                String downloadUrl = intent.getStringExtra("DOWNLOAD_URL");
-                int numChunks = intent.getIntExtra("NUM_CHUNKS", 4);
+                url = intent.getStringExtra("DOWNLOAD_URL");
+                requestedChunks = intent.getIntExtra("NUM_CHUNKS", 4);
+                fileName = intent.getStringExtra("FILE_NAME");
+                cookie = intent.getStringExtra("COOKIE");
+                userAgent = intent.getStringExtra("USER_AGENT");
                 receiver = intent.getParcelableExtra(EXTRA_RECEIVER);
                 
                 startTimeMs = System.currentTimeMillis();
-                isRunning = true;
                 mainHandler.postDelayed(shutdownRunnable, TimeUnit.MINUTES.toMillis(5));
 
-                if( Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE){
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                     startForeground( 
                         NOTIFICATION_ID, 
-                        buildDownloadNotification("Preparing download...", 0, false, false), 
+                        buildDownloadNotification("Preparing download...", 0, "",false, false), 
                         ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
                     );
-                }else{
+                } else {
                     startForeground( 
                         NOTIFICATION_ID, 
-                        buildDownloadNotification("Preparing download...", 0, false, false)
+                        buildDownloadNotification("Preparing download...", 0,"", false, false)
                     );
                 }
-
-                savedUrl = downloadUrl;
-                savedRequestedChunks = numChunks;
-                startDownload(downloadUrl, numChunks);
+                prevdownloadedBytes = 0;
+                startDownload();
             }
         }
         return START_NOT_STICKY;
     }
 
-    private void startDownload(String url, int requestedChunks) {
+    private void startDownload() {
         executorService.execute(() -> {
             try {
-                String fileName = url.substring(url.lastIndexOf('/') + 1);
-                if (fileName.isEmpty() || !fileName.contains(".")) {
-                    fileName = "downloaded_file_" + System.currentTimeMillis();
-                }
-
-                final String finalFileName = fileName;
-                savedFileName = finalFileName;
-                tempFile = new File(getFilesDir(), "temp_" + finalFileName + ".tmp");
-
                 boolean supportsRanges = false;
-                long totalFileSize = 0;
+                totalFileSize = 0;
+                
 
-                Request headRequest = new Request.Builder().url(url).head().build();
+                Request.Builder requestBuilder = new Request.Builder().url(url).head();
+
+                if (cookie != null && !cookie.isEmpty()) {
+                    requestBuilder.addHeader("Cookie", cookie);
+                }
+                if (userAgent != null && !userAgent.isEmpty()) {
+                    requestBuilder.addHeader("User-Agent", userAgent);
+                }
+                
+                Request headRequest = requestBuilder.build();
                 activeCall = client.newCall(headRequest);
 
                 try (Response response = activeCall.execute()) {
@@ -192,14 +203,16 @@ public class DataSyncService extends Service {
                 boolean canThread = supportsRanges && isSizeKnown;
                 int actualChunks = canThread ? requestedChunks : 1;
                 long chunkSize = isSizeKnown ? (totalFileSize / actualChunks) : 0;
+                
                 chunkProgressMap.clear();
+                partFiles.clear();
+                activeChunkDownloaders.clear();
                 completedChunks.set(0);
-                totalChunksCount = actualChunks;
 
                 bundle.clear();
-                bundle.putString("file_name", finalFileName);
+                bundle.putString("file_name", fileName);
                 bundle.putLong("file_size", totalFileSize);
-                bundle.putInt("thread_count" , actualChunks);
+                bundle.putInt("thread_count", actualChunks);
                 if (receiver != null) receiver.send(STATUS_FILE_INFO, bundle);
 
                 ExecutorService chunkExecutor = Executors.newFixedThreadPool(actualChunks);
@@ -208,67 +221,71 @@ public class DataSyncService extends Service {
                 for (int i = 0; i < actualChunks; i++) {
                     long startByte = i * chunkSize;
                     long endByte = (i == actualChunks - 1) ? (totalFileSize - 1) : (startByte + chunkSize - 1);
-
-                    File partFile = new File(getFilesDir(), "temp_" + finalFileName + ".part" + i);
+                    
+                    File partFile = new File(getFilesDir(), fileName + "_part_" + i);
                     partFiles.add(partFile);
 
-                    if (partFile.exists()) {
-                        totalBytesDownloaded.addAndGet(partFile.length());
-                    }
+                    long existingBytes = partFile.exists() ? partFile.length() : 0;
+                    chunkProgressMap.put(i, existingBytes);
 
                     ChunkDownloader downloader = new ChunkDownloader(
-                        i, url, partFile, startByte, endByte, client,
+                        i, url, partFile, startByte, endByte, client, cookie, userAgent,
                         new ChunkDownloader.ChunkProgressListener() {
                             @Override
-                                public void onProgressUpdate(int chunkIndex, long currentChunkBytes, long totalChunkBytes) {
-                                    chunkProgressMap.put(chunkIndex, currentChunkBytes);
+                            public void onProgressUpdate(int chunkIndex, long currentChunkBytes, long totalChunkBytes) {
+                                chunkProgressMap.put(chunkIndex, currentChunkBytes);
 
-                                    long downloaded = 0;
-                                    for (long bytes : chunkProgressMap.values()) {
-                                        downloaded += bytes;
-                                    }
+                                long downloaded = 0;
+                                for (long bytes : chunkProgressMap.values()) {
+                                    downloaded += bytes;
+                                }
 
-                                    long finalDownloaded = downloaded;
-                                    int calcProgress = finalTotalFileSize > 0 ? (int) (finalDownloaded * 100 / finalTotalFileSize) : 0;
-                                    final int progress = Math.min(calcProgress, 100);
-                                    currentProgress = progress;
-                                    mainHandler.post(() -> {
-                                        updateNotification(finalFileName, progress, false, false);
+                                long finalDownloaded = downloaded;
+                                int calcProgress = finalTotalFileSize > 0 ? (int) (finalDownloaded * 100 / finalTotalFileSize) : 0;
+                                final int progress = Math.max(currentProgress ,Math.min(calcProgress, 100));
 
+                                long currentTimeMillis = android.os.SystemClock.elapsedRealtime(); 
+                                long timePassedMillis = currentTimeMillis - lastUpdateTimeMillis;
+
+                                if(timePassedMillis >= 1000){
+                                    speedAndETA = calcSpeedAndEta(finalDownloaded);
+                                    lastUpdateTimeMillis = currentTimeMillis;
+                                    prevdownloadedBytes = finalDownloaded;
+                                }
+                                final String speedAndEtaSnapshot = speedAndETA;
+                                
+                                mainHandler.post(() -> {
+                                        updateNotification(fileName, progress , speedAndEtaSnapshot ,false, false);
+                                        lastDownloadedBytes = finalDownloaded ;
                                         Bundle progressBundle = new Bundle();
                                         progressBundle.putInt("progress", progress);
+                                        progressBundle.putString("speedAndETA", speedAndEtaSnapshot);
                                         progressBundle.putLong("bytes_downloaded", finalDownloaded);
                                         
                                         if (receiver != null) {
                                             receiver.send(STATUS_PROGRESS, progressBundle);
                                         }
-                                    });
-                                }
+                                });
+                            }
 
-                                @Override
-                                public void onError(int chunkIndex, Exception e) {
-                                    mainHandler.post(() -> {
-                                        stopForeground(STOP_FOREGROUND_REMOVE);
-                                        Bundle errorBundle = new Bundle();
-                                        errorBundle.putString("error", e.getMessage());
-                                        if (receiver != null) receiver.send(STATUS_ERROR, errorBundle);
-                                        stopSelf();
-                                    });
-                                }
+                            @Override
+                            public void onError(int chunkIndex, Exception e) {
+                                mainHandler.post(() -> {
+                                    stopForeground(STOP_FOREGROUND_REMOVE);
+                                    Bundle errorBundle = new Bundle();
+                                    errorBundle.putString("error", e.getMessage());
+                                    Log.e(TAG, "Chunk download error: " + e.getMessage(), e);
+                                    if (receiver != null) receiver.send(STATUS_ERROR, errorBundle);
+                                    stopSelf();
+                                });
+                            }
 
-                                @Override
-                                public void onComplete(int chunkIndex) {
-                                    if (completedChunks.incrementAndGet() == totalChunksCount) {
-                                        mainHandler.post(() -> {
-                                            mergeChunkFiles(finalFileName , actualChunks);
-                                            
-                                            Bundle finishBundle = new Bundle();
-                                            if (receiver != null) receiver.send(STATUS_FINISHED, finishBundle);
-                                            stopForeground(STOP_FOREGROUND_REMOVE);
-                                            stopSelf();
-                                        });
-                                    }
+                            @Override
+                            public void onComplete(int chunkIndex) {
+                                if (completedChunks.incrementAndGet() == actualChunks) {
+                                    mainHandler.post(() -> mergeChunkFiles(fileName));
                                 }
+                            }
                         }
                     );
 
@@ -281,7 +298,7 @@ public class DataSyncService extends Service {
             } catch (Exception e) {
                 Log.e(TAG, "Download failed", e);
                 mainHandler.post(() -> {
-                    updateNotification("Download failed", 0, false, true);
+                    updateNotification("Download failed", 0, "" ,false, true);
                     bundle.clear();
                     bundle.putString("error", e.toString());
                     if (receiver != null) receiver.send(STATUS_ERROR, bundle);
@@ -291,13 +308,12 @@ public class DataSyncService extends Service {
         });
     }
 
-    private void mergeChunkFiles(String fileName, int numChunks) {
+    private void mergeChunkFiles(String fileName) {
         File finalTempFile = new File(getFilesDir(), "temp_" + fileName + ".tmp");
 
         try (BufferedSink sink = Okio.buffer(Okio.sink(finalTempFile))) {
-            for (int i = 0; i < numChunks; i++) {
-                File partFile = new File(getFilesDir(), "temp_" + fileName + ".part" + i);
-                if (partFile.exists()) {
+            for (File partFile : partFiles) {
+                if (partFile != null && partFile.exists()) {
                     try (BufferedSource source = Okio.buffer(Okio.source(partFile))) {
                         sink.writeAll(source);
                     }
@@ -308,7 +324,7 @@ public class DataSyncService extends Service {
             publishToPublicDownloads(finalTempFile, fileName);
         } catch (IOException e) {
             mainHandler.post(() -> {
-                updateNotification(fileName, 0, false, true);
+                updateNotification(fileName, 0, "" ,false, true);
                 bundle.clear();
                 bundle.putString("error", e.toString());
                 if (receiver != null) receiver.send(STATUS_ERROR, bundle);
@@ -337,11 +353,57 @@ public class DataSyncService extends Service {
             }
             tempFile.delete();
             mainHandler.post(() -> {
-                updateNotification(fileName, 100, false, true);
+                updateNotification(fileName, 100, "",false, true);
                 bundle.clear();
                 if (receiver != null) receiver.send(STATUS_FINISHED, bundle);
+                stopForeground(STOP_FOREGROUND_REMOVE);
+                stopSelf();
             });
         }
+    }
+
+    private String calcSpeedAndEta(long downloadedBytes) {
+
+        long bytesPerSec = downloadedBytes - prevdownloadedBytes;
+        if (bytesPerSec < 0) bytesPerSec = 0;
+
+        last5Speeds.add(bytesPerSec);
+        if(last5Speeds.size() >5){
+            last5Speeds.remove(0);
+        }
+        long totalSpeedDelta = 0;
+        for (long speed : last5Speeds) {
+            totalSpeedDelta += speed;
+        }
+        long avarageBytesPerSec = totalSpeedDelta/last5Speeds.size();
+
+        String speedStr;
+        if (bytesPerSec >= 1024 * 1024) {
+            double mbPerSec = bytesPerSec / (1024.0 * 1024.0);
+            speedStr = String.format(java.util.Locale.US, "%.2f MB/s", mbPerSec);
+        } else {
+            double kbPerSec = bytesPerSec / 1024.0;
+            speedStr = String.format(java.util.Locale.US, "%.1f KB/s", kbPerSec);
+        }
+
+        String etaStr = "--:--";
+        long bytesRemaining = totalFileSize - downloadedBytes;
+        
+        if (avarageBytesPerSec > 0 && bytesRemaining > 0) {
+            long secondsRemaining = bytesRemaining / avarageBytesPerSec;
+            
+            long hours = secondsRemaining / 3600;
+            long mins = (secondsRemaining % 3600) / 60;
+            long secs = secondsRemaining % 60;
+
+            if (hours > 0) {
+                etaStr = String.format(java.util.Locale.US, "%02d:%02d:%02d", hours, mins, secs);
+            } else {
+                etaStr = String.format(java.util.Locale.US, "%02d:%02d", mins, secs);
+            }
+        }
+        speedAndETA = speedStr + " " + etaStr;
+        return speedAndETA;
     }
 
     private void pauseDownload() {
@@ -350,13 +412,15 @@ public class DataSyncService extends Service {
             downloader.cancel();
         }
         activeChunkDownloaders.clear();
+        last5Speeds.clear(); 
         bundle.putBoolean("is_paused", true);
         if (receiver != null) receiver.send(STATUS_PAUSED, bundle);
     }
 
     private void resumeDownload() {
         isPaused = false;
-        startDownload(savedUrl, savedRequestedChunks);
+        startDownload();
+        lastUpdateTimeMillis = android.os.SystemClock.elapsedRealtime();
         if (receiver != null) receiver.send(STATUS_RESUME, bundle);
     }
 
@@ -367,10 +431,6 @@ public class DataSyncService extends Service {
         }
 
         pauseDownload();
-
-        if (tempFile != null && tempFile.exists()) {
-            tempFile.delete();
-        }
 
         for (File file : partFiles) {
             if (file != null && file.exists()) {
@@ -383,7 +443,6 @@ public class DataSyncService extends Service {
     }
 
     private void stopService() {
-        isRunning = false;
         mainHandler.removeCallbacks(shutdownRunnable);
         if (executorService != null) {
             executorService.shutdownNow();
@@ -391,11 +450,11 @@ public class DataSyncService extends Service {
         stopSelf();
     }
 
-    public void onTimeout(int startId, int fgsType) {
-        if (fgsType == ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) {
-            Log.e(TAG, "Hard system 6-hour timeout hit!");
-            stopService();
-        }
+    @Override
+    public void onTimeout(int startId) {
+        super.onTimeout(startId);
+        Log.e(TAG, "Hard system 6-hour timeout reached for Data Sync service.");
+        stopService();
     }
 
     private void createNotificationChannel() {
@@ -412,9 +471,8 @@ public class DataSyncService extends Service {
         }
     }
 
-    private Notification buildDownloadNotification(String fileName, int progress, boolean isPaused, boolean isComplete) {
+    private Notification buildDownloadNotification(String fileName, int progress, String speedAndEta ,boolean isPaused, boolean isComplete) {
         int notificationIcon;
-        // these icons need to be changed they are inconsistant between devices 
         if (isComplete) {
             notificationIcon = R.drawable.ic_stat_file_download_done; 
         } else if (isPaused) {
@@ -434,19 +492,17 @@ public class DataSyncService extends Service {
             builder.setContentText("Download Complete")
                     .setProgress(0, 0, false);
         } else {
-            builder.setContentText(isPaused ? "Paused • " + progress + "%" : "Downloading • " + progress + "%")
+            builder.setContentText(isPaused ? "Paused - " + progress + "%" : "Downloading - " + progress + "%  " + speedAndEta )
                     .setProgress(100, progress, false);
 
             if (isPaused) {
                 Intent resumeIntent = new Intent(this, DataSyncService.class).setAction(ACTION_RESUME);
-
                 PendingIntent resumePending = PendingIntent.getService(
                         this, 10, resumeIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
                 );
                 builder.addAction(notificationIcon, "Resume", resumePending);
             } else {
                 Intent pauseIntent = new Intent(this, DataSyncService.class).setAction(ACTION_PAUSE);
-
                 PendingIntent pausePending = PendingIntent.getService(
                         this, 11, pauseIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
                 );
@@ -463,13 +519,11 @@ public class DataSyncService extends Service {
         return builder.build();
     }
 
-
-    private void updateNotification(String fileName, int progress, boolean isPaused, boolean isComplete) {
+    private void updateNotification(String fileName, int progress,String speedAndEta , boolean isPaused, boolean isComplete) {
         long currentTime = System.currentTimeMillis();
 
         if (isComplete || isPaused || progress == 100 || (currentTime - lastNotificationUpdateTime) >= 400) {
-            
-            Notification notification = buildDownloadNotification(fileName, progress, isPaused, isComplete);
+            Notification notification = buildDownloadNotification(fileName, progress, speedAndEta ,isPaused, isComplete);
             NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
             
             if (manager != null) {
@@ -478,8 +532,6 @@ public class DataSyncService extends Service {
             }
         }
     }
-
-
 
     @Override
     public void onDestroy() {

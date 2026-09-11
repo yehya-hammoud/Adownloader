@@ -6,120 +6,134 @@
     android:orientation="vertical"
     android:padding="20dp">
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="URL Downloader"
-        android:textSize="24sp"
-        android:layout_marginBottom="16dp" />
-
-    <EditText
-        android:id="@+id/urlInput"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:hint="Paste link here"
-        android:inputType="textUri" />
-
-    <LinearLayout
-        android:id="@+id/optionsLayout"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:visibility="gone">
-
-        <EditText
-            android:id="@+id/threadInput"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:hint="Thread Count"
-            android:inputType="number"
-            android:maxLength="1"  />
-
-        <Button
-            android:id="@+id/goButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="Go" />
-    </LinearLayout>
-
-    <LinearLayout
-        android:id="@+id/infoLayout"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:visibility="gone">
-
-    <TextView
-        android:id="@+id/nameText"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="UnKnown"/>
-
-    <TextView
-        android:id="@+id/sizeText"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="UnKnown" />
-    </LinearLayout>
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:weightSum="3"
-        android:layout_marginTop="24dp"
-        android:gravity="center_vertical"> 
-        
-        <ProgressBar
-            android:id="@+id/progressBar"
-            style="?android:attr/progressBarStyleHorizontal"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="2"        
-            android:max="100"
-            android:visibility="gone" />
+    <LinearLayout 
+    android:id="@+id/mainLayout"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="20dp">
 
         <TextView
-            android:id="@+id/statusText"
-            android:layout_width="0dp"       
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_weight="1"        
-            android:text="0%"
-            android:textSize="16sp"
-            android:gravity="end"            
-            android:layout_marginStart="8dp" 
-            android:visibility="gone" />
-        
+            android:text="URL Downloader"
+            android:textSize="24sp"
+            android:layout_marginBottom="16dp" />
+
+        <EditText
+            android:id="@+id/urlInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Paste link here"
+            android:inputType="textUri" />
+
+        <LinearLayout
+            android:id="@+id/optionsLayout"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:visibility="gone">
+
+            <EditText
+                android:id="@+id/threadInput"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="Thread Count"
+                android:inputType="number"
+                android:maxLength="1"  />
+
+            <Button
+                android:id="@+id/goButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="Go" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/infoLayout"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:visibility="gone">
+
+        <TextView
+            android:id="@+id/nameText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="UnKnown"/>
+
+        <TextView
+            android:id="@+id/sizeText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="UnKnown" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:weightSum="3"
+            android:layout_marginTop="24dp"
+            android:gravity="center_vertical"> 
+            
+            <ProgressBar
+                android:id="@+id/progressBar"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="2"        
+                android:max="100"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/statusText"
+                android:layout_width="0dp"       
+                android:layout_height="wrap_content"
+                android:layout_weight="1"        
+                android:text="0%"
+                android:textSize="10sp"
+                android:gravity="end"            
+                android:layout_marginStart="8dp" 
+                android:visibility="gone" />
+            
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:weightSum="2"
+            android:layout_marginTop="24dp"
+            android:gravity="center_vertical"> 
+
+            <Button
+                android:id="@+id/pauseButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:layout_weight="1" 
+                android:text="Pause"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/cancelButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:layout_weight="1" 
+                android:text="Cancel"
+                android:visibility="gone" />
+
+        </LinearLayout>
     </LinearLayout>
 
-    <LinearLayout
+    <WebView
+        android:id="@+id/webView"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:weightSum="2"
-        android:layout_marginTop="24dp"
-        android:gravity="center_vertical"> 
+        android:layout_height="match_parent"
+        android:visibility="gone" /> 
 
-        <Button
-            android:id="@+id/pauseButton"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:layout_weight="1" 
-            android:text="Pause"
-            android:visibility="gone" />
-
-        <Button
-            android:id="@+id/cancelButton"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:layout_weight="1" 
-            android:text="Cancel"
-            android:visibility="gone" />
-
-    </LinearLayout>
-    
 </LinearLayout>
